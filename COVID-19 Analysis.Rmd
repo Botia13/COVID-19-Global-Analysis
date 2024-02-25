@@ -1,0 +1,260 @@
+---
+title: "COVID-19 Data Analysis"
+author: "David Forero Botia"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+library(dplyr)
+library(hms)
+library(ggplot2)
+library(rworldmap)
+```
+
+## Introduction
+In this document, we will analyze the COVID-19 data Worldwide, presenting information of interest and obtaining relevant insights to answer the questions: 
+
+1. What has been the impact of these diseases in different countries? 
+2. Which ones have been the most and least affected? 
+3. What is the current state of cases?
+
+## Importing and Transforming the Data
+
+### Importing the Data
+
+First, we will need to import the Data provided by the Johns Hopkins Coronavirus Resource Center. We will import directly from the repository so we are allowed to reproduce the analysis by anyone. 
+
+We will import the Data for the Number of cases as `global_cases`, Number of Deaths as `global_deaths` and Population for each country until 2023 as `pops`.
+
+
+
+```{r import, echo=T, results='hide',warning=FALSE, message=FALSE}
+url_in<-'https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/'
+file_names<-c('time_series_covid19_deaths_global.csv','time_series_covid19_confirmed_global.csv')
+urls<-str_c(url_in,file_names)
+
+global_cases<-read_csv(urls[2])
+global_deaths<-read_csv(urls[1])
+
+
+UID_data <- 'https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv'
+pops <- read_csv(UID_data)
+```
+
+### Transforming the Data
+
+To transform the data into something that we can analyze we will follow the next steps: 
+
+1. Convert the `global_cases`  and `global_deaths` tables from wide to long
+```{r echo=FALSE}
+global_cases<- global_cases%>%
+  pivot_longer(cols=-c('Province/State','Country/Region',Lat,Long),
+               names_to='date',
+               values_to='cases')%>%
+  select(-c(Lat,Long))
+
+global_deaths<- global_deaths%>%
+  pivot_longer(cols=-c('Province/State','Country/Region',Lat,Long),
+               names_to='date',
+               values_to='deaths')%>%
+  select(-c(Lat,Long))
+```
+
+2. Joining the tables `global_cases` and `global_deaths` and filter out the rows with cases equals to 0.
+```{r echo=FALSE, message=FALSE}
+global<-global_cases%>%
+  full_join(global_deaths)%>%
+  mutate(date=mdy(date))%>%
+  filter(cases>0)%>%
+  rename(Province_State =`Province/State`, Country_Region =`Country/Region`)
+
+
+```
+
+3. Joining the previous table with the `pops` table.
+```{r echo=FALSE, message=FALSE}
+global <- global %>%
+  left_join(pops, by = c("Province_State", "Country_Region")) %>%
+  select(-c(UID, FIPS))  %>%
+  select(Province_State, Country_Region, date, cases, deaths, Population)
+head(global)
+```
+4. We will group the previous table by Country and add a new variable where we get the deaths per million people. 
+```{r echo=FALSE, message=FALSE}
+global_by_country<- global %>%
+  group_by(Country_Region,date) %>%
+  summarize(cases=sum(cases),deaths=sum(deaths),Population=sum(Population)) %>%
+  mutate(deaths_per_mill=deaths*1000000/Population) %>%
+  select(Country_Region,date,cases,deaths,deaths_per_mill,Population)
+```
+5. We will add the New number of cases and the New number of deaths per Country to the new table. 
+```{r echo=FALSE, message=FALSE}
+global_by_country <- global_by_country %>%
+  mutate(new_cases=cases- lag(cases),
+         new_deaths=deaths-lag(deaths))
+head(global_by_country)
+```
+6. We will create a new table where we display the maximum number of cases and deaths in the whole time frame for each country.
+```{r echo=FALSE, message=FALSE}
+global_country_total<-global_by_country %>%
+  group_by(Country_Region) %>%
+  summarize(deaths=max(deaths), cases =max(cases),
+            Population=max(Population),
+            cases_per_thou=1000*cases/Population,
+            deaths_per_thou=1000*deaths/Population) %>%
+  filter(Population>0)
+head(global_country_total)
+```
+
+## Analyzing the data
+
+1.  First, we will see the complete number of cases and deaths caused by the pandemic: 
+```{r echo=FALSE}
+numbercases<-sum(global_by_country[["cases"]])
+numberdeaths<-sum(global_by_country[["deaths"]])
+
+
+message('The total number of cases since the beginning of the pandemic until the end of 2023 are: ', format(numbercases, big.mark = ","))
+message('The total number of deaths caused by the pandemic until the end of 2023 are: ', format(numberdeaths, big.mark = ","), '. This is equal to a ',round(100*numberdeaths/numbercases,2), '% fatality rate.')
+```
+
+This can be displayed historically in the next graph:
+```{r echo=FALSE}
+total_cases<-global %>%
+  group_by(date) %>%
+  summarize(cases=sum(cases),deaths=sum(deaths),Population=sum(Population)) %>%
+  select(-c(Population))
+
+total_cases %>%
+  ggplot(aes(x=date,y=cases))+
+  geom_line(aes(color='cases'))+
+  geom_line(aes(y=deaths,color='deaths'))+
+  scale_y_log10()+
+  theme(legend.position='bottom',
+        axis.text.x=element_text(angle=90))+
+  labs(title='COVID-19 Historical Analysis',y=NULL)
+```
+
+We can see that the rate of cases and deaths increased rapidly during 2020 and 2021 but after 2022 the number of new cases reduced making the graph flat in his latest part, this can be related to the application of the vaccine to the general population.
+
+We can see better the deceleration of new cases during the years in the following graph, where is displayed the new number of cases and deaths historically. 
+
+```{r echo=FALSE}
+total_cases<-total_cases%>%
+  mutate(new_cases=cases- lag(cases),
+         new_deaths=deaths-lag(deaths))
+
+total_cases %>%
+  filter(new_cases>0,new_deaths>0) %>%
+  ggplot(aes(x=date,y=new_cases))+
+  geom_line(aes(color='new_cases'))+
+  geom_line(aes(y=new_deaths,color='new_deaths'))+
+  scale_y_log10()
+```
+
+2. Now we will analyze the impact of the Pandemic on each country. To do this we will use a new variable, which is the number of cases per thousand people, this way we can normalize the numbers based on each population, and that way we can compare the real impact of COVID-19 on each country. 
+
+In the next graphs, I will present the Top 10 countries with more cases per thousand people and the 10 countries with the least cases per thousand people:
+
+```{r echo=FALSE}
+get_labels <- function(x) {
+  sprintf("%.1f", x)
+}
+
+top_10 <- global_country_total %>%
+  arrange(desc(cases_per_thou)) %>%
+  head(10)
+least_10 <- global_country_total %>%
+  arrange(cases_per_thou) %>%
+  head(10)
+
+# Plot for Top 10
+ggplot(top_10, aes(x = reorder(Country_Region, cases_per_thou), y = cases_per_thou)) +
+  geom_bar(stat = "identity", fill = "salmon") +
+  geom_text(aes(label = get_labels(cases_per_thou)), hjust = -0.1, size = 3, color = "black", vjust = 0.5) +
+  coord_flip() +
+  labs(title = "Top 10 Countries Based on Cases per thousand people",
+       x = "Country",
+       y = "Cases per Thousand") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+# Plot for least 10
+ggplot(least_10, aes(x = reorder(Country_Region, cases_per_thou), y = cases_per_thou)) +
+  geom_bar(stat = "identity", fill = "Light Blue") +
+  geom_text(aes(label = get_labels(cases_per_thou)), hjust = -0.1, size = 3, color = "black", vjust = 0.5) +
+  coord_flip() +
+  labs(title = "Least 10 Countries Based on Cases per thousand people",
+       x = "Country",
+       y = "Cases per Thousand") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Below are the top 10 countries and 10 countries with the least deaths per thousand people: 
+```{r echo=FALSE}
+top_10_d <- global_country_total %>%
+  arrange(desc(deaths_per_thou)) %>%
+  head(10)
+least_10_d <- global_country_total %>%
+  arrange(deaths_per_thou) %>%
+  head(10)
+
+# Plot for Top 10
+ggplot(top_10_d, aes(x = reorder(Country_Region, cases_per_thou), y = cases_per_thou)) +
+  geom_bar(stat = "identity", fill = "salmon") +
+  geom_text(aes(label = get_labels(cases_per_thou)), hjust = -0.1, size = 3, color = "black", vjust = 0.5) +
+  coord_flip() +
+  labs(title = "Top 10 Countries Based on Deaths per thousand people",
+       x = "Country",
+       y = "Cases per Thousand") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+# Plot for least 10
+ggplot(least_10_d, aes(x = reorder(Country_Region, cases_per_thou), y = cases_per_thou)) +
+  geom_bar(stat = "identity", fill = "Light Blue") +
+  geom_text(aes(label = get_labels(cases_per_thou)), hjust = -0.1, size = 3, color = "black", vjust = 0.5) +
+  coord_flip() +
+  labs(title = "Least 10 Countries Based on Deaths per thousand people",
+       x = "Country",
+       y = "Cases per Thousand") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Below we can see the data plotted on a map, allowing us to see more clearly the location of each country and its impact:
+```{r echo=FALSE,results='hide',warning=FALSE, message=FALSE}
+spdf <- joinCountryData2Map(global_country_total, joinCode="NAME", nameJoinColumn="Country_Region")
+```
+```{r echo=FALSE,warning=FALSE, message=FALSE}
+
+
+# Plot the map
+par(mai=c(0,0,0.2,0),xaxs="i",yaxs="i")
+mapCountryData(spdf, nameColumnToPlot="cases_per_thou", catMethod="fixedWidth",mapTitle='COVID-19 Cases per Thousand People', oceanCol='lightblue', missingCountryCol='white',addLegend=FALSE)
+mapCountryData(spdf, nameColumnToPlot="deaths_per_thou", catMethod="fixedWidth",mapTitle='COVID-19 Deaths per Thousand People', oceanCol='lightblue', missingCountryCol='white',addLegend=FALSE)
+```
+
+
+## Conclusion
+
+This analysis delves into the widespread effects of the COVID-19 pandemic, highlighting how each country tackled its unique challenges. Globally, nearly 300k million cases were reported, with a relatively low fatality rate of 1.39%, peaking between 2020 and 2021 before widespread vaccination efforts in 2022.
+
+To provide a clearer picture, we examined cases and deaths per thousand individuals, identifying the top 10 and bottom 10 countries in terms of impact. This approach reveals that countries with high case rates didn't always have the highest death rates per thousand. Notably, Western Europe saw the highest case burden, while Eastern Europe and Latin America had the highest death rates per thousand.
+
+### Bias
+
+It's important to note the limitations of this analysis. Data availability varied across countries, with some withholding information, like China, where the pandemic began. Others had unreliable data, potentially skewing our findings.
+
+Despite these limitations, this analysis offers valuable insights into the global impact of the pandemic, helping us understand how different countries fared and providing a basis for comparison.
+
